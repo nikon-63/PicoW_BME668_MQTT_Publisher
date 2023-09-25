@@ -1,0 +1,6 @@
+Pico | BME688
+
+Ground | GND
+GPIO 0 | SDA
+GPIO 1 | SCL
+3.3 OUT | 2.6V
