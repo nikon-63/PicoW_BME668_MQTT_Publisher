@@ -1,81 +1,103 @@
+from umqtt.robust2 import MQTTClient
 import network
 import time
-from umqtt.simple import MQTTClient
 import bme68x
-from machine import Pin
+from machine import Pin, reset
+import os
 
-# Configuration Constants
+
 WIFI_SSID = ""
 WIFI_PASSWORD = ""
 MQTT_SERVER = ''
 MQTT_USER = ''
 MQTT_PASSWORD = ''
 
-led = Pin('LED', Pin.OUT)
-led.off()
+led = Pin("LED", Pin.OUT)
 
-def connect_wifi(SSID, PASSWORD):
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if not wlan.isconnected():
-        print('Connecting to network...')
-        wlan.connect(SSID, PASSWORD)
-        wlan.ifconfig(('192.168.100.40', '255.255.255.0', '192.168.100.1', '8.8.8.8'))
-        retries = 0
-        while not wlan.isconnected():
-            retries += 1
-            if retries > 3:
-                print("Failed to connect to Wi-Fi. Restarting system.")
-                machine.reset()
-                time.sleep(1)
-            else:
-                time.sleep(5)
-    print('Network configuration:', wlan.ifconfig())
-    return wlan 
+led.value(1)
 
-def connect_mqtt():
-    client = MQTTClient('PicoW-LivingRoom', MQTT_SERVER, user=MQTT_USER, password=MQTT_PASSWORD, keepalive=60)
-    try:
-        client.connect()
-        print("MQTT reconnected")
-        return client
-    except Exception as e:
-        print("Error reconnecting MQTT:", e)
-        machine.reset()
+wlan_retry_count = 0
+mqtt_retry_count = 0
 
-def publishMQTT(client, Location, Type, Value):
-    topic = Location + Type
-    try:
-        client.publish(topic, msg=str(Value))
-    except Exception as e:
-        print("Error publishing MQTT:", e)
-        connect_mqtt()
+def led_blink():
+    led.value(1)
+    time.sleep(0.5)
+    led.value(0)
+
+def logCrash(log):
+    with open('CrashLogs.txt', 'a') as f:
+        f.write(log)
+        f.write('\n')
 
 def readBME():
-    sensor = bme68x.BME68X()
     data = sensor.save_data('data.json')
     return round(data['T'], 1), round(data['H'], 1)
 
-wlan = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
-led.on() if wlan.isconnected() else led.off()
+def mqtt_connect():
+    client = MQTTClient(client_id="PicoW-LivingRoom", server=MQTT_SERVER, port=1883, user=MQTT_USER, password=MQTT_PASSWORD, keepalive=3600)
+    client.connect()
+    print('Connected to MQTT Broker')
+    return client
 
-client = connect_mqtt()
+
+
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+wlan.ifconfig(('192.168.100.40', '255.255.255.0', '192.168.100.1', '8.8.8.8'))
+while wlan.isconnected() == False:
+    if wlan_retry_count > 6:
+        print("Failed first connection to WiFi")
+        logCrash("Failed first connection to WiFi")
+        time.sleep(5)
+        reset()
+    print('Waiting for connection...')
+    wlan_retry_count += 1
+    led_blink()
+    time.sleep(5)
+print("Connected to WiFi")
+
+
+try:
+    client = mqtt_connect()
+except OSError as e:
+    print("Failed first connection to MQTT, resetting device...")
+    logCrash("Failed first connection to MQTT")
+    led_blink()
+    time.sleep(5)
+    reset()
+
+sensor = bme68x.BME68X()
 
 Temperature_Reference = 0
 Humidity_Reference = 0
 
 while True:
     if not wlan.isconnected():
-        led.off()
-        wlan = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
-        client = connect_mqtt()
+        logCrash("Lost connection to WiFi")
+        led_blink()
+        time.sleep(5)
+        reset()
+    if client.is_conn_issue():
+        if mqtt_retry_count > 6:
+            logCrash("Lost connection to MQTT")
+            time.sleep(5)
+            reset()
+        mqtt_retry_count += 1
+        client.reconnect()
+        led_blink()
+        time.sleep(5)
+
     Temperature, Humidity = readBME()
     if Temperature != Temperature_Reference:
         Temperature_Reference = Temperature
-        publishMQTT(client, "LivingRoom/", "Temperature", Temperature)
+        client.publish(("LivingRoom/Temperature"), str(Temperature))
         print("Temperature changed to ", Temperature)
     if Humidity != Humidity_Reference:
         Humidity_Reference = Humidity
-        publishMQTT(client, "LivingRoom/", "Humidity", Humidity)
+        client.publish(("LivingRoom/Humidity"), str(Humidity))
         print("Humidity changed to ", Humidity)
     time.sleep(30)
+    
+    
+
